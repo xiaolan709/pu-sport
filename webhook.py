@@ -27,14 +27,14 @@ def webhook():
     query_result = req.get('queryResult')
     query_text = query_result.get('queryText', '').strip()
     
-    # 📅 1. 智慧星期清洗 ➔ 對齊資料庫的 day_of_week
+    # 📅 1. 智慧星期清洗 ➔ 用於對齊資料庫子文件中的 day_of_week
     target_day = "星期二"
     for d in ["星期一", "星期二", "星期三", "星期四", "星期五"]:
         if d in query_text:
             target_day = d
             break
 
-    # ⏰ 2. 正規表達式時間抽取
+    # ⏰ 2. 正規表達式精準抓取對話中的整數小時
     digits = re.findall(r'\d+', query_text)
     user_hour = 19
     if digits:
@@ -46,39 +46,44 @@ def webhook():
 
     target_time_prefix = f"{user_hour}:"
     sport_keyword = "排球" if "排" in query_text else "籃球"
-    db_sport_type = "室外排球場" if sport_keyword == "排球" else "室外籃球場"
+    db_court_type = "室外排球場" if sport_keyword == "排球" else "室外籃球場"
     
-    # 預設各場地的編號列表
+    # 定義該球類在靜宜戶外的所有場地編號清單
     all_court_numbers = ["1", "2", "3", "4", "5", "6"] if sport_keyword == "排球" else ["1", "2", "3", "4", "5", "6", "7"]
 
     try:
-        # 💡 精準鎖定：去 school_schedule 撈取符合 day_of_week 與 court_type 的資料
-        docs = db.collection("school_schedule") \
-                 .where("day_of_week", "==", target_day) \
-                 .where("court_type", "==", db_sport_type).stream()
-        
         occupied_list = []
         occupied_numbers = []
         
-        for doc in docs:
-            data = doc.to_dict()
-            c_num = data.get('court_number', '').strip()
-            t_slot = data.get('time_slot', '').strip()
-            status = data.get('status', '空堂').strip()
+        # 💡 【細心路徑升級】：我們逐一巡邏這類球類的所有場地父文件
+        for court_num in all_court_numbers:
+            parent_doc_name = f"{db_court_type}_{court_num}"
             
-            # 💡 檢查時間前綴（例如 "19:" 有沒有在 "19:00-21:00" 裡面）
-            if target_time_prefix in t_slot:
-                if status != "空堂" and status != "NO" and status != "" and "開放" not in status:
-                    # 依格式組合出佔用訊息：例如 ❌ 第3場 ➔ 【資管男排】
-                    occupied_list.append(f"❌ 第 {c_num} 場 ➔ 【{status}】")
-                    occupied_numbers.append(c_num)
-                    
-        # 計算有哪些場地是空場
+            # 深入該場地父文件下的子集合 (weekly_schedule)，並精確過濾星期
+            sub_docs = db.collection("school_schedule")\
+                         .document(parent_doc_name)\
+                         .collection("weekly_schedule")\
+                         .where("day_of_week", "==", target_day).stream()
+                         
+            for doc in sub_docs:
+                data = doc.to_dict()
+                t_slot = data.get('time_slot', '').strip()
+                status = data.get('status', '空堂').strip()
+                
+                # 檢查這個時段有沒有包含同學要查的小時（例如 "19:" 有沒有在 "19:00-21:00" 中）
+                if target_time_prefix in t_slot:
+                    if status != "空堂" and status != "NO" and status != "" and "開放" not in status:
+                        # 格式化輸出：❌ 第 3 場 ➔ 【資管男排】
+                        occupied_list.append(f"❌ 第 {court_num} 場 ➔ 【{status}】")
+                        occupied_numbers.append(court_num)
+                        break # 該場地此時段已確認有人，跳出檢查下一個場地
+
+        # 🧮 3. 計算空場
         free_courts = [num for num in all_court_numbers if num not in occupied_numbers]
         free_courts.sort()
         
-        # 4. 組織精緻的回覆
-        reply_text = f"📊 靜宜{db_sport_type}即時回報\n📅 時間：{target_day} [{user_hour}:00 時段]\n"
+        # 4. 組裝回應字串
+        reply_text = f"📊 靜宜{db_court_type}即時回報\n📅 時間：{target_day} [{user_hour}:00 時段]\n"
         reply_text += "-------------------------\n"
         
         if occupied_list:
@@ -88,13 +93,12 @@ def webhook():
             reply_text += "🎉 太棒了！此時段目前沒有任何系隊登記借用！\n\n"
             
         if free_courts:
-            # 依照你的期待，清晰指出哪些場次有空
             reply_text += f"👍 檢查完畢：【第 {', '.join(free_courts)} 場】目前是空場，可以自由去打球喔！"
         else:
-            reply_text += "😭 殘念...這個時段全校場地都被系隊借滿了。"
+            reply_text += "😭 殘念...這個時段所有場地都被系隊借滿了。"
             
     except Exception as e:
-        reply_text = f"資料庫查詢失敗: {e}"
+        reply_text = f"資料庫階層查詢失敗: {e}"
 
     return jsonify({"fulfillmentText": reply_text})
 

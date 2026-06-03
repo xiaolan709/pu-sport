@@ -25,7 +25,7 @@ db = firestore.client()
 
 @app.route('/')
 def home():
-    return "靜宜體育館 Webhook 終極完美切字版運作中！"
+    return "靜宜體育館 Webhook 終極完成版運作中！"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -33,11 +33,10 @@ def webhook():
     query_result = req.get('queryResult')
     parameters = query_result.get('parameters', {})
     
-    # 取得欄位資訊
-    user_court = parameters.get('court_name', '') 
+    # 1. 取得使用者對話
     query_text = query_result.get('queryText', '')
     
-    # 📅 智慧星期清洗：從對話原文撈出「星期幾」
+    # 📅 智慧星期清洗：從對話中精準判斷星期幾
     target_day = "星期二" 
     days_list = ["星期一", "星期二", "星期三", "星期四", "星期五"]
     for d in days_list:
@@ -46,51 +45,54 @@ def webhook():
             break
 
     try:
-        # 去你的 school_schedule 集合撈取當天的全部資料
-        docs = db.collection("school_schedule").where("day_of_week", "==", target_day).stream()
+        # 💡 鎖定你剛剛重新爬好、最乾淨的 pu_real_schedule 集合！
+        docs = db.collection("pu_real_schedule").where("date_day", "==", target_day).stream()
         
         occupied_courts = []
         
         for doc in docs:
             data = doc.to_dict()
             
-            db_court_type = data.get('court_type', '')   # 例如："室外排球場"
-            db_court_num = data.get('court_number', '')  # 例如："3"
+            db_court_name = data.get('court_name', '') # 例如: "1142學期戶外籃排球場1"
             db_status = data.get('status', '空堂')
-            db_time = data.get('time_slot', '')          # 例如："19:00-21:00"
+            db_time = data.get('time_slot', '')        # 例如: "15:00~16:00"
             
-            full_court_name = f"{db_court_type}({db_court_num}號場)"
-            
-            # 💡 【終極智慧型核心】：管你傳過來什麼字，直接拆開用核心關鍵字做比對！
+            # 💡 終極關鍵字雙向過濾：
             is_match = False
             
-            # 如果使用者對話中有提過「排球」，且這筆資料是「排球場」
-            if "排球" in query_text and "排球" in db_court_type:
+            # 如果同學問的是排球，且該資料跟排球有關（或是名字本身包含排球）
+            if "排球" in query_text and "排球" in db_court_name:
                 is_match = True
-            # 如果使用者對話中有提過「籃球」，且這筆資料是「籃球場」
-            elif "籃球" in query_text and "籃球" in db_court_type:
+            # 如果同學問的是籃球，且該資料跟籃球有關
+            elif "籃球" in query_text and "籃球" in db_court_name:
                 is_match = True
-            # 基本保險備份：傳統互相包含
-            elif user_court and (user_court in db_court_type or db_court_type in user_court):
+            # 保險防禦：如果名字裡都有提到
+            elif "球場" in query_text:
                 is_match = True
 
             if is_match:
-                if db_status != "空堂" and db_status != "NO" and db_status != "":
+                # 過濾學校備註或空堂雜訊
+                if db_status != "空堂" and db_status != "NO" and db_status != "" and "開放" not in db_status:
+                    # 簡化一下場地名稱，讓 LINE 顯示得更精簡好看
+                    display_name = db_court_name.replace("1142學期", "")
+                    
                     occupied_courts.append({
-                        "court": full_court_name,
+                        "court": display_name,
                         "time": db_time,
                         "status": db_status
                     })
         
-        # 3. 歸納總結
+        # 3. 歸納結果
         if occupied_courts:
+            # 依場地名稱排序
             occupied_courts.sort(key=lambda x: x['court'])
-            reply_text = f"📊 幫你統整【{target_day}】全校【排/籃球場】的借用狀況如下：\n\n"
+            
+            reply_text = f"📊 幫你統整【{target_day}】全校球場的系隊佔用狀況如下：\n\n"
             for item in occupied_courts:
-                reply_text += f"❌ {item['court']} 時段 [{item['time']}] ➔ {item['status']}\n"
+                reply_text += f"❌ {item['court']} ({item['time']}) ➔ {item['status']}\n"
             reply_text += "\n💡 沒出現在上面的其他場地編號就是空場喔！"
         else:
-            reply_text = f"👍 報告！【{target_day}】的球場目前看起來都是空堂，可以自由使用喔！"
+            reply_text = f"👍 報告！【{target_day}】你查詢的球場目前看起來都是空堂，可以自由使用喔！"
             
     except Exception as e:
         reply_text = f"系統在撈取資料庫時發生錯誤: {e}"

@@ -6,98 +6,87 @@ import os
 import json
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 app = Flask(__name__)
 
 if not firebase_admin._apps:
     try:
         if os.environ.get("FIREBASE_KEY_JSON"):
-            key_dict = json.loads(os.environ.get("FIREBASE_KEY_JSON"))
-            cred = credentials.Certificate(key_dict)
+            cred = credentials.Certificate(json.loads(os.environ.get("FIREBASE_KEY_JSON")))
         else:
             cred = credentials.Certificate("pusport-firebase-key.json")
-            
         firebase_admin.initialize_app(cred)
     except Exception as e:
-        print(f"❌ Firebase 連線失敗: {e}")
+        print(f"Firebase initialization failed: {e}")
 
 db = firestore.client()
-
-@app.route('/')
-def home():
-    return "靜宜體育館 Webhook 終極完成版運作中！"
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     req = request.get_json(silent=True, force=True)
     query_result = req.get('queryResult')
-    parameters = query_result.get('parameters', {})
-    
-    # 1. 取得使用者對話
     query_text = query_result.get('queryText', '')
     
-    # 📅 智慧星期清洗：從對話中精準判斷星期幾
-    target_day = "星期二" 
-    days_list = ["星期一", "星期二", "星期三", "星期四", "星期五"]
-    for d in days_list:
+    # 📅 1. 智慧星期清洗
+    target_day = "星期二"
+    for d in ["星期一", "星期二", "星期三", "星期四", "星期五"]:
         if d in query_text:
             target_day = d
             break
 
+    # ⏰ 2. 智慧時段清洗
+    target_time = "19:00"
+    time_rules = {"15": "15:00", "16": "16:00", "17": "17:00", "18": "18:00", "19": "19:00", "20": "20:00", "21": "21:00",
+                  "3點": "15:00", "4點": "16:00", "5點": "17:00", "6點": "18:00", "7點": "19:00", "8點": "20:00", "9點": "21:00"}
+    for key, val in time_rules.items():
+        if key in query_text:
+            target_time = val
+            break
+
+    # 🏀 3. 判斷球類
+    sport_keyword = "排球" if "排" in query_text else "籃球"
+    # 定義該球類的總場地列表
+    all_courts = ["排球場(男)1", "排球場(女)2", "排球場(男)3", "排球場(女)4", "排球場(男)5", "排球場(女)6"] if sport_keyword == "排球" else ["籃球場1", "籃球場2", "籃球場3", "籃球場4", "籃球場5", "籃球場6", "籃球場7"]
+
     try:
-        # 💡 鎖定你剛剛重新爬好、最乾淨的 pu_real_schedule 集合！
         docs = db.collection("pu_real_schedule").where("date_day", "==", target_day).stream()
         
-        occupied_courts = []
+        occupied_list = []
+        occupied_names = []
         
         for doc in docs:
             data = doc.to_dict()
+            c_name = data.get('court_name', '')
+            t_slot = data.get('time_slot', '')
+            status = data.get('status', '空堂')
             
-            db_court_name = data.get('court_name', '') # 例如: "1142學期戶外籃排球場1"
-            db_status = data.get('status', '空堂')
-            db_time = data.get('time_slot', '')        # 例如: "15:00~16:00"
-            
-            # 💡 終極關鍵字雙向過濾：
-            is_match = False
-            
-            # 如果同學問的是排球，且該資料跟排球有關（或是名字本身包含排球）
-            if "排球" in query_text and "排球" in db_court_name:
-                is_match = True
-            # 如果同學問的是籃球，且該資料跟籃球有關
-            elif "籃球" in query_text and "籃球" in db_court_name:
-                is_match = True
-            # 保險防禦：如果名字裡都有提到
-            elif "球場" in query_text:
-                is_match = True
-
-            if is_match:
-                # 過濾學校備註或空堂雜訊
-                if db_status != "空堂" and db_status != "NO" and db_status != "" and "開放" not in db_status:
-                    # 簡化一下場地名稱，讓 LINE 顯示得更精簡好看
-                    display_name = db_court_name.replace("1142學期", "")
+            # 進行精準時段與球場模糊包含比對
+            if sport_keyword in c_name and target_time in t_slot:
+                if status != "空堂":
+                    occupied_list.append(f"❌ {c_name} ➔ 【{status}】")
+                    occupied_names.append(c_name)
                     
-                    occupied_courts.append({
-                        "court": display_name,
-                        "time": db_time,
-                        "status": db_status
-                    })
+        # 計算空堂場地
+        free_courts = [c for c in all_courts if c not in occupied_names]
         
-        # 3. 歸納結果
-        if occupied_courts:
-            # 依場地名稱排序
-            occupied_courts.sort(key=lambda x: x['court'])
-            
-            reply_text = f"📊 幫你統整【{target_day}】全校球場的系隊佔用狀況如下：\n\n"
-            for item in occupied_courts:
-                reply_text += f"❌ {item['court']} ({item['time']}) ➔ {item['status']}\n"
-            reply_text += "\n💡 沒出現在上面的其他場地編號就是空場喔！"
+        # 4. 組裝完美回覆
+        reply_text = f"📊 靜宜戶外【{sport_keyword}場】即時回報\n📅 時間：{target_day} [{target_time} 開始的時段]\n"
+        reply_text += "-------------------------\n"
+        
+        if occupied_list:
+            reply_text += "⚠️ 有人借用場地：\n" + "\n".join(occupied_list) + "\n\n"
         else:
-            reply_text = f"👍 報告！【{target_day}】你查詢的球場目前看起來都是空堂，可以自由使用喔！"
+            reply_text += "🎉 太棒了！此時段目前沒有任何系隊登記借用！\n\n"
+            
+        if free_courts:
+            clean_free = [c.replace("排球場","").replace("籃球場","") for c in free_courts]
+            reply_text += f"👍 還有空場：【{', '.join(clean_free)}】目前是空的，可以自由使用！"
+        else:
+            reply_text += "😭 殘念...這個時段全部場地都被借滿了。"
             
     except Exception as e:
-        reply_text = f"系統在撈取資料庫時發生錯誤: {e}"
+        reply_text = f"資料庫查詢失敗: {e}"
 
-    response = {
-        "fulfillmentText": reply_text
-    }
-    return jsonify(response)
+    return jsonify({"fulfillmentText": reply_text})
+
+if __name__ == "__main__":
+    app.run(host='0.0.0.0', port=5000)

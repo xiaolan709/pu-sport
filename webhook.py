@@ -27,14 +27,14 @@ def webhook():
     query_result = req.get('queryResult')
     query_text = query_result.get('queryText', '').strip()
     
-    # 📅 星期判定
+    # 📅 1. 智慧星期清洗 ➔ 對齊資料庫的 day_of_week
     target_day = "星期二"
     for d in ["星期一", "星期二", "星期三", "星期四", "星期五"]:
         if d in query_text:
             target_day = d
             break
 
-    # ⏰ 時間數字強制抽取
+    # ⏰ 2. 正規表達式時間抽取
     digits = re.findall(r'\d+', query_text)
     user_hour = 19
     if digits:
@@ -44,37 +44,41 @@ def webhook():
         elif 12 <= first_num <= 23:
             user_hour = first_num
 
-    target_time_str = f"{user_hour}:00"
+    target_time_prefix = f"{user_hour}:"
     sport_keyword = "排球" if "排" in query_text else "籃球"
+    db_sport_type = "室外排球場" if sport_keyword == "排球" else "室外籃球場"
     
-    if sport_keyword == "排球":
-        all_courts = ["排球場(男)1", "排球場(女)2", "排球場(男)3", "排球場(女)4", "排球場(男)5", "排球場(女)6"]
-    else:
-        all_courts = ["籃球場1", "籃球場2", "籃球場3", "籃球場4", "籃球場5", "籃球場6", "籃球場7"]
+    # 預設各場地的編號列表
+    all_court_numbers = ["1", "2", "3", "4", "5", "6"] if sport_keyword == "排球" else ["1", "2", "3", "4", "5", "6", "7"]
 
     try:
-        docs = db.collection("pu_real_schedule").where("date_day", "==", target_day).stream()
+        # 💡 精準鎖定：去 school_schedule 撈取符合 day_of_week 與 court_type 的資料
+        docs = db.collection("school_schedule") \
+                 .where("day_of_week", "==", target_day) \
+                 .where("court_type", "==", db_sport_type).stream()
         
         occupied_list = []
-        occupied_names = []
+        occupied_numbers = []
         
         for doc in docs:
             data = doc.to_dict()
-            c_name = data.get('court_name', '').strip()
+            c_num = data.get('court_number', '').strip()
             t_slot = data.get('time_slot', '').strip()
             status = data.get('status', '空堂').strip()
             
-            # 💡 雙重核心過濾：球場關鍵字正確 且 包含了查詢的時間（如 "19:00"）
-            if sport_keyword in c_name and target_time_str in t_slot:
+            # 💡 檢查時間前綴（例如 "19:" 有沒有在 "19:00-21:00" 裡面）
+            if target_time_prefix in t_slot:
                 if status != "空堂" and status != "NO" and status != "" and "開放" not in status:
-                    occupied_list.append(f"❌ {c_name} ➔ 【{status}】")
-                    occupied_names.append(c_name)
+                    # 依格式組合出佔用訊息：例如 ❌ 第3場 ➔ 【資管男排】
+                    occupied_list.append(f"❌ 第 {c_num} 場 ➔ 【{status}】")
+                    occupied_numbers.append(c_num)
                     
-        # 計算空場
-        free_courts = [c for c in all_courts if c not in occupied_names]
+        # 計算有哪些場地是空場
+        free_courts = [num for num in all_court_numbers if num not in occupied_numbers]
+        free_courts.sort()
         
-        # 4. 組裝回覆
-        reply_text = f"📊 靜宜戶外【{sport_keyword}場】即時回報\n📅 時間：{target_day} [{target_time_str} 開始的時段]\n"
+        # 4. 組織精緻的回覆
+        reply_text = f"📊 靜宜{db_sport_type}即時回報\n📅 時間：{target_day} [{user_hour}:00 時段]\n"
         reply_text += "-------------------------\n"
         
         if occupied_list:
@@ -84,9 +88,8 @@ def webhook():
             reply_text += "🎉 太棒了！此時段目前沒有任何系隊登記借用！\n\n"
             
         if free_courts:
-            clean_free = [c.replace("排球場","").replace("籃球場","") for c in free_courts]
-            clean_free.sort()
-            reply_text += f"👍 還有空場：【{', '.join(clean_free)}】目前是空的，可以自由使用！"
+            # 依照你的期待，清晰指出哪些場次有空
+            reply_text += f"👍 檢查完畢：【第 {', '.join(free_courts)} 場】目前是空場，可以自由去打球喔！"
         else:
             reply_text += "😭 殘念...這個時段全校場地都被系隊借滿了。"
             

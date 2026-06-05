@@ -27,7 +27,7 @@ def webhook():
     query_result = req.get('queryResult')
     query_text = query_result.get('queryText', '').strip()
     
-    # 📅 1. 智慧星期清洗 ➔ 用於對齊資料庫子文件中的 day_of_week
+    # 📅 1. 智慧星期清洗 ➔ 用於對齊資料庫中的 day_of_week
     target_day = "星期二"
     for d in ["星期一", "星期二", "星期三", "星期四", "星期五"]:
         if d in query_text:
@@ -44,7 +44,6 @@ def webhook():
         elif 12 <= first_num <= 23:
             user_hour = first_num
 
-    target_time_prefix = f"{user_hour}:"
     sport_keyword = "排球" if "排" in query_text else "籃球"
     db_court_type = "室外排球場" if sport_keyword == "排球" else "室外籃球場"
     
@@ -54,52 +53,82 @@ def webhook():
     try:
         occupied_list = []
         occupied_numbers = []
-        
-        # 💡 【細心路徑升級】：我們逐一巡邏這類球類的所有場地父文件
-        for court_num in all_court_numbers:
-            parent_doc_name = f"{db_court_type}_{court_num}"
-            
-            # 深入該場地父文件下的子集合 (weekly_schedule)，並精確過濾星期
-            sub_docs = db.collection("school_schedule")\
-                         .document(parent_doc_name)\
-                         .collection("weekly_schedule")\
-                         .where("day_of_week", "==", target_day).stream()
-                         
-            for doc in sub_docs:
-                data = doc.to_dict()
-                t_slot = data.get('time_slot', '').strip()
-                status = data.get('status', '空堂').strip()
+
+        # 💡 修正縮排並精準撈取當天該球類的所有資料
+        docs = db.collection("training_schedule") \
+                 .where("court_type", "==", db_court_type) \
+                 .where("day_of_week", "==", target_day) \
+                 .stream()
+
+        for doc in docs:
+            data = doc.to_dict()
+            court_num = str(data.get("court_number", "")).strip()
+            team = str(data.get("team", "空堂")).strip()
+            t_slot = str(data.get("time_slot", "")).strip()
+
+            try:
+                # 抓出時段開始的小時（例如 "19:00-19:30" ➔ 抓出 19）
+                start_hour = int(t_slot.split("-")[0].split(":")[0])
+            except:
+                continue
+
+            # 如果這筆課表的小時跟使用者要查的時間不相符，直接跳過
+            if start_hour != user_hour:
+                continue
+
+            # 判定是否真的有人借用
+            if team not in ["空堂", "禁止預約", ""]:
+                # 建立顯示格式，例如：❌ 第 3 場 ➔ 【資管男排】 (19:00-19:30)
+                # 加上括號時間可以讓同學更清楚是前排還是後排練球！
+                display_info = f"❌ 第 {court_num} 場 ➔ 【{team}】 ({t_slot})"
                 
-                # 檢查這個時段有沒有包含同學要查的小時（例如 "19:" 有沒有在 "19:00-21:00" 中）
-                if target_time_prefix in t_slot:
-                    if status != "空堂" and status != "NO" and status != "" and "開放" not in status:
-                        # 格式化輸出：❌ 第 3 場 ➔ 【資管男排】
-                        occupied_list.append(f"❌ 第 {court_num} 場 ➔ 【{status}】")
-                        occupied_numbers.append(court_num)
-                        break # 該場地此時段已確認有人，跳出檢查下一個場地
+                # 防止 30 分鐘拆分時，重複加入同一個場地的佔用訊息
+                if display_info not in occupied_list:
+                    occupied_list.append(display_info)
+                
+                if court_num not in occupied_numbers:
+                    occupied_numbers.append(court_num)
 
         # 🧮 3. 計算空場
-        free_courts = [num for num in all_court_numbers if num not in occupied_numbers]
+        free_courts = [
+            num for num in all_court_numbers
+            if num not in occupied_numbers
+        ]
         free_courts.sort()
-        
-        # 4. 組裝回應字串
-        reply_text = f"📊 靜宜{db_court_type}即時回報\n📅 時間：{target_day} [{user_hour}:00 時段]\n"
+
+        # 📊 4. 組裝回覆訊息
+        reply_text = (
+            f"📊 靜宜{db_court_type}即時回報\n"
+            f"📅 時間：{target_day} [{user_hour}:00 時段]\n"
+        )
         reply_text += "-------------------------\n"
-        
+
         if occupied_list:
             occupied_list.sort()
-            reply_text += "⚠️ 有人借用場地：\n" + "\n".join(occupied_list) + "\n\n"
+            reply_text += (
+                "⚠️ 有人借用場地：\n"
+                + "\n".join(occupied_list)
+                + "\n\n"
+            )
         else:
-            reply_text += "🎉 太棒了！此時段目前沒有任何系隊登記借用！\n\n"
-            
-        if free_courts:
-            reply_text += f"👍 檢查完畢：【第 {', '.join(free_courts)} 場】目前是空場，可以自由去打球喔！"
-        else:
-            reply_text += "😭 殘念...這個時段所有場地都被系隊借滿了。"
-            
-    except Exception as e:
-        reply_text = f"資料庫階層查詢失敗: {e}"
+            reply_text += (
+                "🎉 太棒了！此時段目前沒有任何系隊登記借用！\n\n"
+            )
 
+        if free_courts:
+            reply_text += (
+                f"👍 檢查完畢：【第 {', '.join(free_courts)} 場】"
+                "目前是空場，可以自由去打球喔！"
+            )
+        else:
+            reply_text += (
+                "😭 殘念...這個時段所有場地都被系隊借滿了。"
+            )
+
+    except Exception as e:
+        reply_text = f"資料庫查詢失敗：{str(e)}"
+
+    # 💡 【核心修正】：將最後封裝好的完美 JSON 訊息回傳給 Dialogflow
     return jsonify({"fulfillmentText": reply_text})
 
 if __name__ == "__main__":
